@@ -80,6 +80,7 @@ fun withApi(
     fingerprint: String? = FP,
     publicUrl: String? = null,
     proxy: ProxyMode? = null,
+    voiceProviderFactory: dev.avijit.orbit.server.agent.voice.VoiceProviderFactory? = null,
     block: suspend ApiEnv.() -> Unit,
 ) = withTempDir { dir ->
     val home = ServerHome(dir)
@@ -88,6 +89,7 @@ fun withApi(
         val deps = ServerDeps(
             store = store, fingerprint = fingerprint, masterKey = MasterKey(home), clock = clock, limits = limits,
             zone = ZoneOffset.UTC, env = env, providerFactory = providerFactory, publicUrl = publicUrl, proxy = proxy,
+            voiceProviderFactory = voiceProviderFactory,
         )
         testApplication {
             application { orbitModule(deps) }

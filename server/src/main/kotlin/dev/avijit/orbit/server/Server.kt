@@ -5,6 +5,13 @@ import dev.avijit.orbit.server.api.DEVICE_AUTH
 import dev.avijit.orbit.server.api.Ingest
 import dev.avijit.orbit.server.api.RateLimiter
 import dev.avijit.orbit.server.agent.AgentSettings
+import dev.avijit.orbit.server.agent.ConversationStore
+import dev.avijit.orbit.server.agent.voice.DefaultVoiceProviderFactory
+import dev.avijit.orbit.server.agent.voice.VoiceHttp
+import dev.avijit.orbit.server.agent.voice.VoiceProviderFactory
+import dev.avijit.orbit.server.agent.voice.VoiceService
+import dev.avijit.orbit.server.agent.voice.VoiceSettings
+import dev.avijit.orbit.server.api.walkerVoiceRoutes
 import dev.avijit.orbit.server.agent.DefaultProviderFactory
 import dev.avijit.orbit.server.agent.ProviderFactory
 import dev.avijit.orbit.server.agent.ProviderHttp
@@ -78,6 +85,10 @@ data class Limits(
     /** `/v1/walker/ask` + `/v1/walker/continue` per device; its own budget, so glasses never use up the ring app's asks. */
     val walkerCallsPerMinute: Int = 60,
     val maxWalkerBytes: Int = 128 * 1024,
+    /** `/v1/walker/speak` + `/v1/walker/voices` per device: each speak is a paid provider call. */
+    val walkerSpeakPerMinute: Int = 30,
+    val maxSpeakChars: Int = 1_500,
+    val maxSpeakBytes: Int = 16 * 1024,
 )
 
 /**
@@ -102,14 +113,20 @@ class ServerDeps(
     val certPem: String? = null,
     /** Set for `run --behind-proxy`: forwarded-header trust and the public URL (pairing then uses trust mode `ca`). */
     val proxy: ProxyMode? = null,
+    /** Builds text-to-speech providers (default: the real ones over a shared client with 20 s timeouts). */
+    voiceProviderFactory: VoiceProviderFactory? = null,
 ) {
     val pairing = Pairing(store, clock)
     val setupCode = SetupCode(store, clock)
     val accessLog = AccessLog(store, clock)
     val agentSettings = AgentSettings(store, masterKey, env)
     val agentTokens = AgentTokens(store, clock)
+    val conversations = ConversationStore(store)
     private val http by lazy { ProviderHttp.client() }
     val providerFactory: ProviderFactory = providerFactory ?: DefaultProviderFactory({ http }, clock, zone)
+    val voiceSettings = VoiceSettings(store, masterKey)
+    private val voiceHttp by lazy { VoiceHttp.client() }
+    val voices = VoiceService(voiceSettings, voiceProviderFactory ?: DefaultVoiceProviderFactory { voiceHttp }, clock)
 
     /**
      * The user's zone for local days: [requested] (the phone's zone on this request) when valid, else the zone from the
@@ -170,6 +187,7 @@ fun Application.orbitModule(deps: ServerDeps) {
             deviceRoutes(deps.store, deps.accessLog)
             agentRoutes(deps, askLimiter)
             walkerRoutes(deps)
+            walkerVoiceRoutes(deps)
         }
     }
 }

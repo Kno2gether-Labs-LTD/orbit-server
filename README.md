@@ -56,9 +56,11 @@ All routes are HTTPS (or plain HTTP to a trusted reverse proxy only). Errors are
 | `POST /v1/agent/ask` | device token | Health agent: `{question, history?, zone?}` → `{answer, provenance, model}` |
 | `POST /v1/walker/ask` | device token | OrbitWalker voice agent: start a turn (below) |
 | `POST /v1/walker/continue` | device token | OrbitWalker: send client-tool results for a paused turn |
+| `GET /v1/walker/voices` | device token | OrbitWalker: server voices of the configured text-to-speech providers (below) |
+| `POST /v1/walker/speak` | device token | OrbitWalker: `{text, voice?}` → MP3 audio |
 | `POST /mcp` | agent token | MCP (Streamable HTTP, JSON responses, stateless): the five read-only health tools |
 | `GET /v1/data/samples`, `GET /v1/data/sleep` | agent token | REST reads with server-side aggregation |
-| `/`, `/pair`, `/devices`, `/agent`, `/tokens`, `/access`, `/export`, `/cert.pem` | admin session | Dashboard |
+| `/`, `/pair`, `/devices`, `/agent`, `/voices`, `/tokens`, `/access`, `/export`, `/cert.pem` | admin session | Dashboard |
 
 Device tokens come from pairing and carry the scopes chosen on the device (heart, sleep, activity, stress, SpO₂, ring & profile). Agent tokens are created on the dashboard or with `orbit-server token create`.
 
@@ -78,11 +80,12 @@ A walker turn is a tool loop in which some tools run on the server (the health t
        {"name": "open_app", "description": "Open an app on the glasses by name.",
         "parameters": {"type": "object", "properties": {"app": {"type": "string"}}, "required": ["app"]}}
      ],
-     "zone": "Europe/London"
+     "zone": "Europe/London",
+     "conversation": "kD1r6mXk3o2W0bq9JmY1pQ"
    }
    ```
 
-   `context` (what is on the glasses right now) goes into the system prompt, pretty-printed and cut at 12 KB. `history`, `context`, `tools` and `zone` are optional.
+   `context` (what is on the glasses right now) goes into the system prompt, pretty-printed and cut at 12 KB. `history`, `context`, `tools`, `zone` and `conversation` are optional.
 2. If the model needs the glasses, the reply is `status: "tools"`:
 
    ```json
@@ -91,7 +94,7 @@ A walker turn is a tool loop in which some tools run on the server (the health t
      "calls": [{"id": "toolu_01", "name": "open_app", "args": {"app": "Maps"}}],
      "say": "Opening Maps.",
      "provenance": [{"tool": "get_metric", "args": {"metric": "HEART_RATE", "agg": "avg"}}],
-     "model": "claude-sonnet-5-5"
+     "model": "claude-sonnet-5-5", "conversation": "kD1r6mXk3o2W0bq9JmY1pQ"
    }
    ```
 
@@ -108,8 +111,14 @@ A walker turn is a tool loop in which some tools run on the server (the health t
    ```json
    {"status": "done", "answer": "Maps is open. Your heart rate averaged 64 bpm over the last day.", "turn": null,
     "calls": [], "say": null, "provenance": [{"tool": "get_metric", "args": {"metric": "HEART_RATE", "agg": "avg"}}],
-    "model": "claude-sonnet-5-5"}
+    "model": "claude-sonnet-5-5", "conversation": "kD1r6mXk3o2W0bq9JmY1pQ"}
    ```
+
+Conversations: the server keeps them, so the phone need not send `history`.
+
+- Every reply (`tools` and `done`) carries `conversation`. Send it with the next ask to continue: the model then gets that conversation's last 20 messages (at most 16,000 characters, oldest dropped first) as history, and any `history` in the request is ignored.
+- No `conversation`, or one that is unknown, belongs to another device, or has had no message for 6 hours: the server starts a new conversation (a new id in the reply), and the model sees the request's `history` as before. A malformed id (not 1–64 of `A-Z a-z 0-9 _ -`) is 400 `bad_request`.
+- When a turn is done, the user's words and the final answer are stored (each cut at 4000 characters); tool calls and results are not. Failed turns store nothing. Each device keeps at most 2000 messages (oldest deleted). Revoking or unpairing a device deletes its messages; **Agent → Conversations** on the dashboard deletes everyone's.
 
 Rules and limits:
 
@@ -120,6 +129,21 @@ Rules and limits:
 - Each finished or failed turn writes one `walker_ask` access-log row, e.g. `outcome=ok model=... tool_calls=1 client_calls=2`. It never contains the user's words or tool arguments. Health reads during the turn are logged per call, as for the health agent.
 
 The request and reply shapes are `WalkerAskRequest`, `WalkerContinueRequest`, `WalkerReply` and friends in `sync-protocol` (`WalkerDtos.kt`), so the app can share them.
+
+### OrbitWalker: server voices
+
+The glasses can play speech made by the server, and fall back to their own text-to-speech when the server has no voice or a request fails. Configure any of these under **Voices** on the dashboard (API keys are stored encrypted with `master.key` and never shown again):
+
+| Provider | Endpoint used | Default model | Voices |
+|---|---|---|---|
+| `openai` | `POST https://api.openai.com/v1/audio/speech` | `gpt-4o-mini-tts` | built-in set (alloy, ash, ballad, cedar, coral, echo, fable, marin, nova, onyx, sage, shimmer, verse) |
+| `elevenlabs` | `POST https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_128` | `eleven_flash_v2_5` | the account's voices from `GET /v2/voices` |
+| `inworld` | `POST https://api.inworld.ai/tts/v1/voice` (base URL can be changed, https only) | `inworld-tts-2` | `GET /voices/v1/voices` |
+| `assemblyai` | `POST https://tts.us.assemblyai.com/v1/speech` | `assemblyai-tts-1` | AssemblyAI's published starter voices (it has no list endpoint) |
+
+- `GET /v1/walker/voices` → `{"voices": [{"id": "openai:coral", "name": "Coral", "provider": "openai", "providerName": "OpenAI"}], "default": "openai:coral"}`. Only configured providers are listed; one whose voice list fails is left out. Lists are cached for 10 minutes. `default` is the dashboard's default voice when it is available, else the first voice, else null.
+- `POST /v1/walker/speak {"text": "...", "voice": "openai:coral"}` → 200 with the MP3 bytes (`Content-Type: audio/mpeg`). `voice` null or absent means `default`. Errors: 400 `bad_request` (text empty or over 1500 characters), 400 `unknown_voice`, 404 `no_voice` (nothing configured), 502 `voice_error` (the provider failed or took over 20 s), 429 `rate_limited` (30 a minute per device, voices and speak together).
+- The text goes to the chosen provider and nowhere else: it is not stored or logged.
 
 ## Data folder
 
@@ -592,12 +616,12 @@ docker run --rm -i -v orbit-data:/data eclipse-temurin:17-jre tar -xzf - -C /dat
   - Devices pin the self-signed certificate, or check the public certificate for your exact host name behind Caddy. Plain HTTP is never served except to a trusted reverse proxy.
   - Keep the port off the open internet when you can, and use the LAN or a VPN such as Tailscale.
   - Behind Caddy (`--behind-proxy`), keep Orbit Server's port unpublished and name only the proxy in `--trusted-proxy`: forwarded headers from any other address are ignored, and dashboard forms are refused unless the trusted proxy reports https.
-- **Rate limits per device:** 60 ingests, 20 health-agent asks and 60 walker calls a minute (then 429). Agent tokens: 120 requests a minute. A health-agent ask gets at most 150 s for all its model calls; for OrbitWalker the 150 s applies to each HTTP call of a turn.
+- **Rate limits per device:** 60 ingests, 20 health-agent asks and 60 walker calls and 30 walker speech requests a minute (then 429). Agent tokens: 120 requests a minute. A health-agent ask gets at most 150 s for all its model calls; for OrbitWalker the 150 s applies to each HTTP call of a turn.
 - **Tokens:**
   - Device and agent tokens are 256-bit random values; only their SHA-256 hashes are stored.
   - Pairing codes are single use and expire after 10 minutes. The `orbit://` and `orbitwalker://` links on the pairing page are the same code.
   - Give each agent its own token with the smallest set of scopes, and revoke tokens you no longer use (`orbit-server token revoke`, or the dashboard). Remove a lost phone or glasses under **Devices**.
-- **OrbitWalker client tools run on the phone, not here.** The server only relays the model's calls and the phone's results; the glasses app decides what each tool may do. Health tools in a walker turn use the scopes of the device that asked. A paused turn (conversation, health results, glasses context) is held in memory for at most 120 s and is never written to disk or logs.
-- **Model choice is a privacy choice.** With the Claude API, the tool results for each request, and the glasses context for OrbitWalker, go to Anthropic. With Ollama or LM Studio they stay on your machine.
+- **OrbitWalker client tools run on the phone, not here.** The server only relays the model's calls and the phone's results; the glasses app decides what each tool may do. Health tools in a walker turn use the scopes of the device that asked. A paused turn (conversation, health results, glasses context) is held in memory for at most 120 s and is never written to disk or logs. Finished turns' words and answers are kept in the database as conversation history (see above) until deleted.
+- **Model choice is a privacy choice.** With the Claude API, the tool results for each request, and the glasses context for OrbitWalker, go to Anthropic. With Ollama or LM Studio they stay on your machine. With a server voice, each spoken reply goes to that voice provider.
 - **Check the access log.** It lists who read what and how many rows, never the values. Revoked or out-of-scope attempts are logged as `DENIED`.
 - **Logs** contain no health values, no tokens and no user words.

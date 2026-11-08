@@ -14,6 +14,9 @@ class PendingTurn(
     val zoneId: String,
     val createdMs: Long,
     val deadlineMs: Long,
+    /** The conversation the turn belongs to and the user's words, stored with the answer when the turn is done. */
+    val conversation: String? = null,
+    val userText: String? = null,
 )
 
 /**
@@ -47,7 +50,10 @@ class WalkerTurns(
     val size: Int get() = turns.size
 
     /** Stores a paused turn and returns its id, or null when the store is full of live turns. */
-    fun put(deviceId: String, deviceName: String, state: WalkerState, clientTools: List<ToolSpec>, zoneId: String): String? {
+    fun put(
+        deviceId: String, deviceName: String, state: WalkerState, clientTools: List<ToolSpec>, zoneId: String,
+        conversation: String? = null, userText: String? = null,
+    ): String? {
         val dropped = mutableListOf<PendingTurn>()
         val id = synchronized(this) {
             val now = clock.millis()
@@ -63,7 +69,7 @@ class WalkerTurns(
             }
             if (turns.size >= maxPending) return@synchronized null
             val id = newId()
-            turns[id] = PendingTurn(id, deviceId, deviceName, state, clientTools, zoneId, now, now + ttlMs)
+            turns[id] = PendingTurn(id, deviceId, deviceName, state, clientTools, zoneId, now, now + ttlMs, conversation, userText)
             id
         }
         dropped.forEach(onDropped)

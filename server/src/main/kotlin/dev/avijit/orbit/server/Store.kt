@@ -82,7 +82,12 @@ class Store(private val dbFile: Path) : AutoCloseable {
 
     fun listDevices(): List<DeviceRow> = read { c -> c.query("SELECT * FROM devices ORDER BY created_ms") { it.device() } }
 
-    fun revokeDevice(id: String): Boolean = write { c -> c.update("UPDATE devices SET revoked = 1 WHERE id = ?", id) == 1 }
+    /** Revokes the device and deletes its walker conversation history ([dev.avijit.orbit.server.agent.ConversationStore]). */
+    fun revokeDevice(id: String): Boolean = transaction { c ->
+        val ok = c.update("UPDATE devices SET revoked = 1 WHERE id = ?", id) == 1
+        c.update("DELETE FROM walker_messages WHERE device_id = ?", id)
+        ok
+    }
 
     fun touchDevice(id: String, nowMs: Long) = write { c -> c.update("UPDATE devices SET last_seen_ms = ? WHERE id = ?", nowMs, id) }
 
@@ -326,9 +331,9 @@ class Store(private val dbFile: Path) : AutoCloseable {
         return cfg.createConnection(url)
     }
 
-    private fun <T> write(block: (Connection) -> T): T = writeLock.withLock { block(writer) }
+    internal fun <T> write(block: (Connection) -> T): T = writeLock.withLock { block(writer) }
 
-    private fun <T> transaction(block: (Connection) -> T): T = writeLock.withLock {
+    internal fun <T> transaction(block: (Connection) -> T): T = writeLock.withLock {
         writer.autoCommit = false
         try {
             block(writer).also { writer.commit() }
@@ -340,7 +345,7 @@ class Store(private val dbFile: Path) : AutoCloseable {
         }
     }
 
-    private fun <T> read(block: (Connection) -> T): T = open().use(block)
+    internal fun <T> read(block: (Connection) -> T): T = open().use(block)
 
     private fun createPrivateFile(path: Path) {
         Files.createDirectories(path.toAbsolutePath().parent)
@@ -361,7 +366,7 @@ class Store(private val dbFile: Path) : AutoCloseable {
         /** Metrics whose stored value is raised when a larger value arrives for the same timestamp (as in the app). */
         val MAX_WINS = setOf("STEPS", "DISTANCE_M", "CALORIES_KCAL", "STEPS_DAY_TOTAL")
 
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
 
         private val SCHEMA = listOf(
             """CREATE TABLE IF NOT EXISTS devices(
@@ -390,6 +395,12 @@ class Store(private val dbFile: Path) : AutoCloseable {
                 action TEXT NOT NULL, detail TEXT NOT NULL, rows INTEGER NOT NULL)""",
             "CREATE INDEX IF NOT EXISTS access_log_at ON access_log(at_ms)",
             "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            // v3: OrbitWalker conversation history (see agent/ConversationStore.kt). Additive; nothing else changes.
+            """CREATE TABLE IF NOT EXISTS walker_messages(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                conversation TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+            "CREATE INDEX IF NOT EXISTS walker_messages_conv ON walker_messages(device_id, conversation, id)",
+            "CREATE INDEX IF NOT EXISTS walker_messages_device ON walker_messages(device_id, id)",
         )
     }
 }
@@ -399,7 +410,7 @@ private val Boolean.int get() = if (this) 1 else 0
 private fun Set<String>.joinScopes() = sorted().joinToString(",")
 private fun String.splitScopes(): Set<String> = split(',').filter { it.isNotBlank() }.toSet()
 
-private fun PreparedStatement.bind(vararg args: Any?): PreparedStatement {
+internal fun PreparedStatement.bind(vararg args: Any?): PreparedStatement {
     args.forEachIndexed { i, a ->
         val idx = i + 1
         when (a) {
@@ -415,9 +426,9 @@ private fun PreparedStatement.bind(vararg args: Any?): PreparedStatement {
     return this
 }
 
-private fun Connection.update(sql: String, vararg args: Any?): Int = prepareStatement(sql).use { it.bind(*args).executeUpdate() }
+internal fun Connection.update(sql: String, vararg args: Any?): Int = prepareStatement(sql).use { it.bind(*args).executeUpdate() }
 
-private fun <T> Connection.query(sql: String, vararg args: Any?, map: (ResultSet) -> T): List<T> =
+internal fun <T> Connection.query(sql: String, vararg args: Any?, map: (ResultSet) -> T): List<T> =
     prepareStatement(sql).use { st ->
         st.bind(*args).executeQuery().use { rs ->
             val out = ArrayList<T>()

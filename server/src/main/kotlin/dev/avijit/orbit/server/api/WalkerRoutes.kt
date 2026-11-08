@@ -5,6 +5,7 @@ import dev.avijit.orbit.server.ServerDeps
 import dev.avijit.orbit.server.agent.AgentTools
 import dev.avijit.orbit.server.agent.Caller
 import dev.avijit.orbit.server.agent.ClientResult
+import dev.avijit.orbit.server.agent.ConversationStore
 import dev.avijit.orbit.server.agent.ProviderConfig
 import dev.avijit.orbit.server.agent.ProviderException
 import dev.avijit.orbit.server.agent.StoreDataTools
@@ -13,6 +14,7 @@ import dev.avijit.orbit.server.agent.WalkerAgent
 import dev.avijit.orbit.server.agent.WalkerOutcome
 import dev.avijit.orbit.server.agent.WalkerState
 import dev.avijit.orbit.server.agent.WalkerTurns
+import dev.avijit.orbithealth.sync.ChatTurn
 import dev.avijit.orbithealth.sync.WalkerAskRequest
 import dev.avijit.orbithealth.sync.WalkerCall
 import dev.avijit.orbithealth.sync.WalkerContinueRequest
@@ -37,6 +39,11 @@ private val log = LoggerFactory.getLogger("dev.avijit.orbit.server.api.Walker")
  * - When the model calls a client tool the reply is `{status:"tools", turn, calls, say?}`: the phone runs the calls
  *   and posts `POST /v1/walker/continue {turn, results}` (one result per call id, any order) within 120 s.
  * - `{status:"done", answer}` ends the turn.
+ * - Both replies carry `conversation`. An ask may send it back (`conversation`, 1–64 of `[A-Za-z0-9_-]`, else 400
+ *   `bad_request`): when it is one of this device's conversations with a message in the last 6 hours, its stored
+ *   messages ([ConversationStore.resolve]) are the model's history and the client's `history` is ignored; otherwise
+ *   a new conversation starts with the client's `history`, as before. A done turn stores the user's words and the
+ *   answer in its conversation.
  *
  * Errors: 400 `bad_question` (empty or over-long text), 400 `bad_tools` (see [validateTools]), 400 `bad_results`
  * (ids do not match the pending calls; the turn stays pending), 404 `unknown_turn` (unknown, used, or another
@@ -58,6 +65,9 @@ fun Route.walkerRoutes(deps: ServerDeps) {
         val req = call.receiveLimited(WalkerAskRequest.serializer(), deps.limits.maxWalkerBytes)
         val text = req.text.trim()
         if (text.isEmpty() || text.length > deps.limits.maxQuestionChars) throw ApiError(HttpStatusCode.BadRequest, "bad_question")
+        if (req.conversation != null && !ConversationStore.CONVERSATION_ID.matches(req.conversation!!)) {
+            throw ApiError(HttpStatusCode.BadRequest, "bad_request")
+        }
         val zone = deps.userZone(req.zone)
         val health = healthTools(deps, device, zone)
         val clientTools = validateTools(req.tools, health.specs.map { it.name }.toSet())
@@ -66,8 +76,13 @@ fun Route.walkerRoutes(deps: ServerDeps) {
         val turn = Turn(deps, device)
         try {
             val config = turn.config()
+            // A live conversation of this device supplies the history; otherwise a new one starts with the client's.
+            val conversation = deps.conversations.resolve(device.id, req.conversation, deps.clock.millis())
+            turn.conversation = conversation.id
+            turn.userText = text
+            val history = conversation.history?.map { ChatTurn(it.role, it.text) } ?: req.history
             val agent = WalkerAgent(deps.providerFactory.create(config), health, clientTools, deps.clock, zone)
-            val state = agent.start(text, req.history, req.context)
+            val state = agent.start(text, history, req.context)
             turn.state = state
             val outcome = turn.step(config) { agent.run(state) }
             call.respond(turn.reply(outcome, turns, clientTools, zone))
@@ -94,7 +109,11 @@ fun Route.walkerRoutes(deps: ServerDeps) {
         val results = req.results.associate { it.id to ClientResult(it.content.take(MAX_RESULT_CHARS), it.isError) }
         val zone = ZoneId.of(pending.zoneId)
 
-        val turn = Turn(deps, device).also { it.state = pending.state }
+        val turn = Turn(deps, device).also {
+            it.state = pending.state
+            it.conversation = pending.conversation
+            it.userText = pending.userText
+        }
         try {
             val config = turn.config()
             val agent = WalkerAgent(deps.providerFactory.create(config), healthTools(deps, device, zone), pending.clientTools, deps.clock, zone)
@@ -144,6 +163,8 @@ private class Turn(private val deps: ServerDeps, private val device: DeviceRow) 
     var outcome = "error"
     var model = "-"
     var state: WalkerState? = null
+    var conversation: String? = null
+    var userText: String? = null
     private var paused = false
 
     fun config(): ProviderConfig {
@@ -179,11 +200,12 @@ private class Turn(private val deps: ServerDeps, private val device: DeviceRow) 
             is WalkerOutcome.Done -> {
                 model = out.model
                 outcome = "ok"
-                WalkerReply(WalkerReply.DONE, answer = out.answer, provenance = s.provenance.toList(), model = out.model)
+                remember(out.answer)
+                WalkerReply(WalkerReply.DONE, answer = out.answer, provenance = s.provenance.toList(), model = out.model, conversation = conversation)
             }
             is WalkerOutcome.Paused -> {
                 model = out.model
-                val id = turns.put(device.id, device.name, s, clientTools, zone.id)
+                val id = turns.put(device.id, device.name, s, clientTools, zone.id, conversation, userText)
                 if (id == null) {
                     outcome = "busy"
                     throw ApiError(HttpStatusCode.ServiceUnavailable, "busy")
@@ -191,9 +213,22 @@ private class Turn(private val deps: ServerDeps, private val device: DeviceRow) 
                 paused = true
                 WalkerReply(
                     WalkerReply.TOOLS, turn = id, calls = out.calls.map { WalkerCall(it.id, it.name, it.args) }, say = out.say,
-                    provenance = s.provenance.toList(), model = out.model,
+                    provenance = s.provenance.toList(), model = out.model, conversation = conversation,
                 )
             }
+        }
+    }
+
+    /** Stores the user's words and the final answer in the conversation. A storage failure never fails the reply. */
+    private fun remember(answer: String) {
+        val id = conversation ?: return
+        val user = userText ?: return
+        try {
+            deps.conversations.append(
+                device.id, id, listOf(ConversationStore.USER to user, ConversationStore.ASSISTANT to answer), deps.clock.millis(),
+            )
+        } catch (e: Exception) {
+            log.warn("Could not store the walker conversation: {}", e::class.java.simpleName)
         }
     }
 

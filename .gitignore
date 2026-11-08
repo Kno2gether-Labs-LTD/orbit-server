@@ -12,3 +12,8 @@ captures/
 
 # Orbit Server deploy settings (domain, email)
 deploy/.env
+
+# Local secrets (never commit)
+.env
+.env.*
+!.env.example
