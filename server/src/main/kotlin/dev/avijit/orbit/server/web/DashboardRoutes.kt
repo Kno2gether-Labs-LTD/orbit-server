@@ -16,6 +16,9 @@ import dev.avijit.orbit.server.agent.Caller
 import dev.avijit.orbit.server.agent.ProviderException
 import dev.avijit.orbit.server.agent.ProviderKind
 import dev.avijit.orbit.server.agent.StoreDataTools
+import dev.avijit.orbit.server.agent.voice.Audio
+import dev.avijit.orbit.server.agent.voice.VoiceKind
+import dev.avijit.orbit.server.agent.voice.VoiceService
 import dev.avijit.orbit.server.api.ApiError
 import dev.avijit.orbit.server.api.RateLimiter
 import dev.avijit.orbit.server.api.receiveTextLimited
@@ -97,6 +100,8 @@ class Dashboard(private val deps: ServerDeps) {
     private val loginLimiter = RateLimiter(deps.limits.loginFailuresPer15Min, 15 * 60_000L, deps.clock)
     private val setupLimiter = RateLimiter(deps.limits.loginFailuresPer15Min, 15 * 60_000L, deps.clock)
     private val testLimiter = RateLimiter(10, 60_000L, deps.clock)
+    /** The last voice test's audio, for the Voices page's player (memory only, one clip). */
+    @Volatile private var lastTestAudio: Audio? = null
     init {
         // Expired and used pairing tokens are also pruned whenever a new one is minted (Pairing.newToken).
         deps.store.purgePairTokens(deps.clock.millis())
@@ -119,6 +124,12 @@ class Dashboard(private val deps: ServerDeps) {
         private const val MAX_PASSWORD = 200
         private const val MIN_PASSWORD = dev.avijit.orbit.server.Cli.MIN_PASSWORD
         private const val BCRYPT_COST = dev.avijit.orbit.server.Cli.BCRYPT_COST
+        private val VOICE_KEY_HINTS = mapOf(
+            VoiceKind.OPENAI to "From platform.openai.com (API keys).",
+            VoiceKind.ELEVENLABS to "From elevenlabs.io (Developers, API keys); it needs text-to-speech and voices read access.",
+            VoiceKind.INWORLD to "The Base64 credential from the Inworld portal (API keys), pasted as shown.",
+            VoiceKind.ASSEMBLYAI to "From assemblyai.com (API keys); the same key as speech-to-text.",
+        )
     }
 
     // ------------------------------------------------------------------ sessions and CSRF
@@ -330,6 +341,7 @@ class Dashboard(private val deps: ServerDeps) {
             call.page { Pages.agent(this, chrome(s, "/agent"), agentVm(
                 saved = call.request.queryParameters["saved"] == "1",
                 keyRemoved = call.request.queryParameters["keyRemoved"] == "1",
+                cleared = call.request.queryParameters["cleared"] == "1",
             )) }
         }
 
@@ -366,6 +378,75 @@ class Dashboard(private val deps: ServerDeps) {
                 TestResult(null, null, emptyList(), "Too many tests in a minute. Wait a moment and try again.")
             } else runTest()
             call.page { Pages.agent(this, chrome(s, "/agent"), agentVm(test = result)) }
+        }
+
+        post("/agent/conversations/delete") {
+            call.authedPost() ?: return@post
+            val n = deps.conversations.deleteAll()
+            log.info("Deleted {} walker conversation messages from the dashboard", n)
+            call.seeOther("/agent?cleared=1")
+        }
+
+        get("/voices") {
+            val s = call.authedGet() ?: return@get
+            val vm = voicesVm(saved = call.request.queryParameters["saved"] == "1")
+            call.page { Pages.voices(this, chrome(s, "/voices"), vm) }
+        }
+
+        post("/voices/default") {
+            val (s, form) = call.authedPost() ?: return@post
+            val id = form["voice"].orEmpty().trim()
+            val known = id.isEmpty() || deps.voices.catalog().voices.any { it.id == id }
+            if (!known) {
+                val vm = voicesVm(error = "Choose one of the listed voices.")
+                return@post call.page(HttpStatusCode.BadRequest) { Pages.voices(this, chrome(s, "/voices"), vm) }
+            }
+            deps.voiceSettings.setDefaultVoice(id.ifEmpty { null })
+            call.seeOther("/voices?saved=1")
+        }
+
+        post("/voices/test") {
+            val (s, _) = call.authedPost() ?: return@post
+            val vm = if (!testLimiter.tryAcquire("voice")) {
+                voicesVm(testError = "Too many tests in a minute. Wait a moment and try again.")
+            } else when (val out = deps.voices.speak(VOICE_TEST_TEXT, null)) {
+                is VoiceService.Outcome.Spoken -> {
+                    lastTestAudio = out.audio
+                    voicesVm(testBytes = out.audio.bytes.size, testVoice = out.voice)
+                }
+                VoiceService.Outcome.NoVoice, VoiceService.Outcome.UnknownVoice -> voicesVm(testError = "No voice is available. Save a provider key first.")
+                is VoiceService.Outcome.Failed -> voicesVm(testError = "${out.kind?.displayName ?: "The provider"} failed (${out.code}).")
+            }
+            call.page { Pages.voices(this, chrome(s, "/voices"), vm) }
+        }
+
+        get("/voices/test.mp3") {
+            call.authedGet() ?: return@get
+            val audio = lastTestAudio ?: return@get call.respond(HttpStatusCode.NotFound)
+            call.response.header(HttpHeaders.CacheControl, "no-store")
+            call.respondBytes(audio.bytes, ContentType.parse(audio.contentType))
+        }
+
+        post("/voices/{provider}") {
+            val kind = VoiceKind.fromWire(call.parameters["provider"]) ?: return@post call.respond(HttpStatusCode.NotFound)
+            val (s, form) = call.authedPost() ?: return@post
+            val key = when {
+                form["removeKey"] == "1" -> ""
+                form["apiKey"].isNullOrBlank() -> null
+                else -> form["apiKey"]
+            }
+            val error = try {
+                deps.voiceSettings.save(kind, key, form["model"], form["baseUrl"])
+                null
+            } catch (e: IllegalArgumentException) {
+                e.message ?: "Those settings are not valid."
+            } catch (e: IllegalStateException) {
+                "The server has no master key loaded, so it cannot store an API key."
+            }
+            deps.voices.invalidate()
+            if (error == null) return@post call.seeOther("/voices?saved=1")
+            val vm = voicesVm(error = "${kind.displayName}: $error")
+            call.page(HttpStatusCode.BadRequest) { Pages.voices(this, chrome(s, "/voices"), vm) }
         }
 
         get("/tokens") {
@@ -465,12 +546,33 @@ class Dashboard(private val deps: ServerDeps) {
 
     private fun agentVm(
         form: AgentForm? = null, error: String? = null, saved: Boolean = false, test: TestResult? = null, keyRemoved: Boolean = false,
+        cleared: Boolean = false,
     ): AgentVm {
         val settings = deps.agentSettings
         val cfg = settings.load()
         val kind = deps.store.getSetting(AgentSettings.PROVIDER) ?: cfg?.kind?.wire ?: ProviderKind.ANTHROPIC.wire
         val f = form ?: AgentForm(kind, deps.store.getSetting(AgentSettings.BASE_URL).orEmpty(), deps.store.getSetting(AgentSettings.MODEL) ?: cfg?.model.orEmpty())
-        return AgentVm(settings.selectableKinds(), f, cfg != null, settings.hasApiKey(), error, saved, test, keyRemoved && !settings.hasApiKey(), settings.loadRefusal())
+        return AgentVm(
+            settings.selectableKinds(), f, cfg != null, settings.hasApiKey(), error, saved, test, keyRemoved && !settings.hasApiKey(), settings.loadRefusal(),
+            conversationMessages = deps.conversations.count(), conversationsCleared = cleared,
+        )
+    }
+
+    private suspend fun voicesVm(
+        error: String? = null, saved: Boolean = false, testError: String? = null, testBytes: Int? = null, testVoice: String? = null,
+    ): VoicesVm {
+        val vs = deps.voiceSettings
+        val catalog = deps.voices.catalog()
+        val providers = VoiceKind.entries.map { k ->
+            val listed = catalog.providers.firstOrNull { it.kind == k }
+            VoiceProviderVm(
+                k.wire, k.displayName, vs.hasKey(k), vs.storedModel(k).orEmpty(), k.defaultModel,
+                listed?.takeIf { it.error == null }?.voices?.size, listed?.error, VOICE_KEY_HINTS.getValue(k),
+                baseUrl = if (k.defaultBaseUrl != null) vs.storedBaseUrl(k).orEmpty() else null, defaultBaseUrl = k.defaultBaseUrl,
+            )
+        }
+        val options = catalog.voices.map { VoiceOption(it.id, it.name, it.providerName) }
+        return VoicesVm(providers, options, vs.defaultVoice(), catalog.defaultVoice, error, saved, testError, testBytes, testVoice)
     }
 
     private suspend fun runTest(): TestResult {

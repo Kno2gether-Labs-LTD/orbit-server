@@ -74,6 +74,7 @@ val NAV = listOf(
     NavItem("/pair", "Pair a phone", "phone"),
     NavItem("/devices", "Devices", "ring"),
     NavItem("/agent", "Agent", "ask"),
+    NavItem("/voices", "Voices", "breath"),
     NavItem("/tokens", "Agent tokens", "key"),
     NavItem("/access", "Access log", "shield"),
     NavItem("/export", "Export", "down"),

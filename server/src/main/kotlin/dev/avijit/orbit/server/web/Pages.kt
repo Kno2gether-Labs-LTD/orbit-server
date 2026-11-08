@@ -22,6 +22,8 @@ import kotlinx.html.h3
 import kotlinx.html.label
 import kotlinx.html.li
 import kotlinx.html.ol
+import kotlinx.html.audio
+import kotlinx.html.optGroup
 import kotlinx.html.option
 import kotlinx.html.p
 import kotlinx.html.passwordInput
@@ -108,6 +110,25 @@ class AgentVm(
     val error: String? = null, val saved: Boolean = false, val test: TestResult? = null, val keyRemoved: Boolean = false,
     /** Why a saved provider is not used (see [dev.avijit.orbit.server.agent.AgentSettings.loadRefusal]). */
     val refusal: String? = null,
+    /** Stored OrbitWalker conversation messages, all devices. */
+    val conversationMessages: Int = 0,
+    val conversationsCleared: Boolean = false,
+)
+
+/** One provider on the Voices page. [error] is why its voice list failed (a short code), if it did. */
+class VoiceProviderVm(
+    val wire: String, val name: String, val hasKey: Boolean, val model: String, val defaultModel: String,
+    val voiceCount: Int?, val error: String?, val keyHint: String,
+    /** Null: this provider has no configurable base URL. Otherwise the stored override ("" for the official endpoint). */
+    val baseUrl: String? = null, val defaultBaseUrl: String? = null,
+)
+
+class VoiceOption(val id: String, val name: String, val providerName: String)
+
+/** [testError] / [testBytes]: the outcome of the last "Test" (an audio player is shown for a success). */
+class VoicesVm(
+    val providers: List<VoiceProviderVm>, val options: List<VoiceOption>, val storedDefault: String?, val effectiveDefault: String?,
+    val error: String? = null, val saved: Boolean = false, val testError: String? = null, val testBytes: Int? = null, val testVoice: String? = null,
 )
 
 class CreatedToken(val name: String, val scopes: Set<String>, val token: String, val mcpUrl: String, val base: String)
@@ -126,6 +147,7 @@ class ExportVm(val samples: Int, val nights: Int, val devices: Int, val accessRo
 // ---------------------------------------------------------------- pages
 
 const val TEST_QUESTION = "What was my resting heart rate yesterday?"
+const val VOICE_TEST_TEXT = "Hello! This is your Orbit voice."
 
 object Pages {
 
@@ -485,6 +507,117 @@ object Pages {
                         }
                         t.model?.let { p(classes = "caption") { +"Model: $it · logged as “dashboard”" } }
                     }
+                }
+            }
+        }
+        section(classes = "card form-card") {
+            h3(classes = "card-title") { +"Conversations" }
+            if (vm.conversationsCleared) notice("ok", "Conversation history deleted.")
+            p(classes = "insight") {
+                +"${"%,d".format(vm.conversationMessages)} stored message${if (vm.conversationMessages == 1) "" else "s"}"
+            }
+            p(classes = "meta") {
+                +"OrbitWalker keeps each conversation on this server (your words and the assistant's answers) so follow-up "
+                +"questions have context. At most 2,000 messages per device; a device's history is deleted when it is revoked."
+            }
+            form(action = "/agent/conversations/delete", method = FormMethod.post) {
+                attributes["data-confirm"] = "Delete all OrbitWalker conversation history? This cannot be undone."
+                csrfField(c.csrf)
+                button(type = ButtonType.submit, classes = "btn ghost danger") {
+                    if (vm.conversationMessages == 0) attributes["disabled"] = "disabled"
+                    +"Delete all conversation history"
+                }
+            }
+        }
+    }
+
+    fun voices(h: HTML, c: Chrome, vm: VoicesVm) = h.shell(
+        c, "Voices", "Voices", { +"Server "; em { +"voices" } },
+        "Text-to-speech for the OrbitWalker glasses. Configure any of these providers; the glasses use their own voice when none is set or a request fails.",
+    ) {
+        vm.error?.let { notice("error", it) }
+        if (vm.saved) notice("ok", "Saved.")
+        div(classes = "two-col") {
+            for (pv in vm.providers) section(classes = "card form-card") {
+                h3(classes = "card-title") { +pv.name }
+                when {
+                    !pv.hasKey -> p(classes = "meta") { +"Not configured." }
+                    pv.error != null -> notice("error", "The voice list could not be loaded (${pv.error}). Check the key.")
+                    pv.voiceCount != null -> p(classes = "meta") { +"${pv.voiceCount} voice${if (pv.voiceCount == 1) "" else "s"} available." }
+                }
+                form(action = "/voices/${pv.wire}", method = FormMethod.post, classes = "stack") {
+                    csrfField(c.csrf)
+                    label(classes = "field") {
+                        span(classes = "field-label") { +"API key" }
+                        passwordInput(name = "apiKey") {
+                            placeholder = if (pv.hasKey) "•••••••••••• saved key" else "Not set"
+                            attributes["autocomplete"] = "off"
+                        }
+                        span(classes = "hint") {
+                            +(if (pv.hasKey) "A key is saved (encrypted on this machine). Leave blank to keep it. " else "Stored encrypted on this machine and never shown again. ")
+                            +pv.keyHint
+                        }
+                    }
+                    label(classes = "field") {
+                        span(classes = "field-label") { +"Model" }
+                        textInput(name = "model") {
+                            value = pv.model; placeholder = pv.defaultModel
+                            attributes["autocomplete"] = "off"; attributes["spellcheck"] = "false"
+                        }
+                        span(classes = "hint") { +"Leave blank for ${pv.defaultModel}." }
+                    }
+                    if (pv.baseUrl != null) label(classes = "field") {
+                        span(classes = "field-label") { +"Base URL" }
+                        textInput(name = "baseUrl") {
+                            value = pv.baseUrl; placeholder = pv.defaultBaseUrl.orEmpty()
+                            attributes["autocomplete"] = "off"; attributes["spellcheck"] = "false"
+                        }
+                        span(classes = "hint") { +"Optional (https only). Leave blank for the official endpoint." }
+                    }
+                    if (pv.hasKey) label(classes = "check") {
+                        checkBoxInput(name = "removeKey") { value = "1" }
+                        span { +"Remove the saved key" }
+                    }
+                    button(type = ButtonType.submit, classes = "btn primary") { +"Save" }
+                }
+            }
+        }
+        div(classes = "two-col") {
+            section(classes = "card form-card") {
+                h3(classes = "card-title") { +"Default voice" }
+                form(action = "/voices/default", method = FormMethod.post, classes = "stack") {
+                    csrfField(c.csrf)
+                    label(classes = "field") {
+                        span(classes = "field-label") { +"Voice" }
+                        select {
+                            name = "voice"
+                            option { value = ""; selected = vm.storedDefault == null; +"Automatic (first available voice)" }
+                            for ((provider, opts) in vm.options.groupBy { it.providerName }) optGroup(provider) {
+                                for (o in opts) option { value = o.id; selected = o.id == vm.storedDefault; +o.name }
+                            }
+                        }
+                        span(classes = "hint") {
+                            +(vm.effectiveDefault?.let { "The glasses currently get $it when they ask for the default." }
+                                ?: "No voice is available yet: save a provider key first.")
+                        }
+                    }
+                    button(type = ButtonType.submit, classes = "btn primary") { +"Save" }
+                }
+            }
+            section(classes = "card tint-sleep test-card") {
+                h3(classes = "card-title") { +"Try it" }
+                p(classes = "insight") { +"“$VOICE_TEST_TEXT”" }
+                form(action = "/voices/test", method = FormMethod.post) {
+                    csrfField(c.csrf)
+                    button(type = ButtonType.submit, classes = "btn ghost") {
+                        if (vm.effectiveDefault == null) attributes["disabled"] = "disabled"
+                        +"Speak with the default voice"
+                    }
+                }
+                vm.testError?.let { notice("error", it) }
+                vm.testBytes?.let { n ->
+                    p(classes = "meta") { +"${vm.testVoice}: ${"%,d".format(n)} bytes of MP3." }
+                    audio { attributes["controls"] = "controls"; attributes["src"] = "/voices/test.mp3" }
                 }
             }
         }
