@@ -22,13 +22,14 @@ class PendingTurn(
  * - Ids are 128-bit random, base64url.
  * - Each turn expires [ttlMs] after it was paused, and is single use: a successful [claim] removes it.
  * - Only the device that started a turn can claim it; for any other device it does not exist.
- * - At most [maxPending] turns. When full, expired turns are evicted oldest first; if none has expired, [put]
+ * - At most [maxPerDevice] turns per device (its oldest is dropped to make room), and [maxPending] in all. When full, expired turns are evicted oldest first; if none has expired, [put]
  *   refuses (the route answers 503 `busy`). Evicted turns are passed to [onDropped] (for the access log).
  */
 class WalkerTurns(
     private val clock: Clock,
     private val maxPending: Int = MAX_PENDING,
     private val ttlMs: Long = TTL_MS,
+    private val maxPerDevice: Int = MAX_PER_DEVICE,
     private val onDropped: (PendingTurn) -> Unit = {},
 ) {
     private val turns = java.util.concurrent.ConcurrentHashMap<String, PendingTurn>()
@@ -50,6 +51,9 @@ class WalkerTurns(
         val dropped = mutableListOf<PendingTurn>()
         val id = synchronized(this) {
             val now = clock.millis()
+            // One device can hold at most [maxPerDevice] paused turns: its oldest makes room, never other devices' turns.
+            val mine = turns.values.filter { it.deviceId == deviceId }.sortedBy { it.createdMs }
+            for (t in mine.take((mine.size - maxPerDevice + 1).coerceAtLeast(0))) if (turns.remove(t.id, t)) dropped += t
             if (turns.size >= maxPending) {
                 val expired = turns.values.filter { it.deadlineMs <= now }.sortedBy { it.createdMs }
                 for (t in expired) {
@@ -91,5 +95,7 @@ class WalkerTurns(
     companion object {
         const val MAX_PENDING = 64
         const val TTL_MS = 120_000L
+        /** A phone only ever needs one paused turn at a time; a few allow for retries. */
+        const val MAX_PER_DEVICE = 4
     }
 }

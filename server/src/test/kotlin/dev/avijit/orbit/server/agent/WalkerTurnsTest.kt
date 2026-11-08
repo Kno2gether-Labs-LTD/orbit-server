@@ -38,4 +38,16 @@ class WalkerTurnsTest {
         assertTrue(turns.claim(id, "d1") { true } is WalkerTurns.Claim.Expired)
         assertEquals(0, turns.size)
     }
+
+    @Test fun oneDeviceCannotCrowdOutOthers() {
+        val clock = MutableClock(0)
+        val dropped = mutableListOf<String>()
+        val turns = WalkerTurns(clock, maxPending = 6, maxPerDevice = 2) { dropped += it.id }
+        val other = turns.put("good", "G", state(), emptyList(), "UTC")!!
+        val ids = (1..5).map { clock.advance(1); turns.put("noisy", "N", state(), emptyList(), "UTC")!! }
+        assertEquals(3, turns.size) // the other device's turn + the noisy device's newest two
+        assertEquals(ids.take(3), dropped)
+        assertTrue(turns.claim(other, "good") { true } is WalkerTurns.Claim.Ok)
+        assertTrue(turns.claim(ids.last(), "noisy") { true } is WalkerTurns.Claim.Ok)
+    }
 }
