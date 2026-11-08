@@ -184,9 +184,11 @@ The `Dockerfile` in the repository root packages the `installDist` output. No Gr
 docker build -t orbit-server .
 ```
 
-For a VPS, prefer the Compose bundle with Caddy: see [VPS with a domain (recommended)](#vps-with-a-domain-recommended). The rest of this page describes the self-signed setup (a Mac, a LAN server, or a VPS reached over a VPN).
+For a VPS, prefer the Compose bundle with Caddy. Our recommended setup keeps the server on your private Tailscale network (the bundle's `docker-compose.tailscale.yml` override, see the [hosting guide](https://orbitapps.space/docs/hosting/)); a public domain also works: see [VPS with a domain](#vps-with-a-domain-recommended). The rest of this page describes the self-signed setup (a Mac, a LAN server, or a VPS reached over a VPN).
 
 ## VPS with a domain (recommended)
+
+> **Most private:** run the same bundle on your Tailscale network only, with `docker-compose.tailscale.yml`, so nothing is reachable from the internet. Step-by-step: [orbitapps.space/docs/hosting](https://orbitapps.space/docs/hosting/).
 
 On a VPS, run Orbit Server behind [Caddy](https://caddyserver.com) with the Compose bundle in `deploy/`. Caddy gets a real Let's Encrypt certificate for your domain and renews it by itself, so browsers, MCP clients and curl trust the server with no extra setup. Phones pair against the public certificate and accept it only for your exact host name (trust mode "public certificate"); they never fall back to plain HTTP.
 
@@ -590,8 +592,9 @@ Everything is in the data folder (`~/.orbit-server`, or the `orbit-data` volume 
 ```sh
 # Stop the server first (launchctl bootout … / systemctl stop orbit-server), then:
 (umask 077 && tar -czf orbit-server-backup-$(date +%F).tgz -C ~ .orbit-server)
-# Docker volume (stop the container first; the Compose bundle's volume is orbit_orbit-data):
-(umask 077 && docker run --rm -v orbit-data:/data:ro eclipse-temurin:17-jre \
+# Docker volume (stop the container first). The Compose bundle's volume is orbit_orbit-data;
+# a plain `docker run` setup uses orbit-data instead:
+(umask 077 && docker run --rm -v orbit_orbit-data:/data:ro eclipse-temurin:17-jre \
   tar -czf - -C /data . > orbit-server-backup-$(date +%F).tgz)
 ```
 
@@ -600,7 +603,7 @@ Everything is in the data folder (`~/.orbit-server`, or the `orbit-data` volume 
 To restore into an empty volume (the server stopped), extract as root so the files keep their uid 10001 owner:
 
 ```sh
-docker run --rm -i -v orbit-data:/data eclipse-temurin:17-jre tar -xzf - -C /data < orbit-server-backup-YYYY-MM-DD.tgz
+docker run --rm -i -v orbit_orbit-data:/data eclipse-temurin:17-jre tar -xzf - -C /data < orbit-server-backup-YYYY-MM-DD.tgz
 ```
 
 - Keep `tls.p12` and `tls.pass` if you want paired phones to keep working after a restore. Without them, a new certificate is made and every phone must pair again.

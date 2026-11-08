@@ -8,7 +8,7 @@
 #   docker compose up -d --build && docker compose ps   # ports: 100.x.y.z:443 only
 #
 # The tailscaled socket gives Caddy (root in its container) control of the host's tailscaled,
-# whatever the :ro says. docs/server.md describes a certificate-file setup without the socket.
+# whatever the :ro says. README.md describes a certificate-file setup without the socket.
 #
 # Caddy asks the host's tailscaled for a real Let's Encrypt certificate for the *.ts.net name
 # through the mounted socket (Caddy does this by itself for *.ts.net hosts), so no ACME challenge
