@@ -17,7 +17,8 @@ import kotlin.math.roundToLong
 /**
  * A deterministic stand-in model for tests and the debug end-to-end run (enabled only with `ORBIT_SCRIPTED_AGENT=1`).
  *
- * For a new question it calls one tool: `get_sleep(last night)` when the question mentions sleep, otherwise
+ * A question starting with "open " while the glasses' `open_app` tool is declared calls that tool (OrbitWalker
+ * end-to-end runs) and then confirms with its result. Otherwise, for a new question it calls one tool: `get_sleep(last night)` when the question mentions sleep, otherwise
  * `get_metric(HEART_RATE, last 24 h, avg)`. Once the tool result arrives it answers with the numbers from that
  * result, word for word, and never computes anything itself.
  */
@@ -27,9 +28,16 @@ class ScriptedProvider(private val clock: Clock, private val zone: ZoneId) : Mod
     override suspend fun chat(messages: List<Msg>, tools: List<ToolSpec>): ModelReply {
         val lastUser = messages.indexOfLast { it is Msg.User }
         val result = messages.drop(lastUser + 1).filterIsInstance<Msg.ToolResult>().lastOrNull()
+        if (result != null && result.name == "open_app") {
+            return ModelReply.Text(if (result.isError) "I couldn't open that: ${result.content}" else "Done: ${result.content}.")
+        }
         if (result != null) return ModelReply.Text(answer(result))
 
         val question = (messages.getOrNull(lastUser) as? Msg.User)?.text.orEmpty().lowercase()
+        // OrbitWalker end-to-end: "open X" with the glasses' open_app tool declared → call it on the phone.
+        if (question.startsWith("open ") && tools.any { it.name == "open_app" }) {
+            return ModelReply.ToolCalls(listOf(ToolCall("scripted_open", "open_app", buildJsonObject { put("name", question.removePrefix("open ").trim()) })))
+        }
         val call = if (SLEEP_WORDS.any { it in question }) {
             ToolCall("scripted_1", "get_sleep", buildJsonObject { put("night", LocalDate.now(clock.withZone(zone)).minusDays(1).toString()) })
         } else {
