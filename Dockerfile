@@ -12,12 +12,12 @@
 #     orbit-server run --host orbit.example.com
 #   docker logs orbit     # first start prints a one-time setup code; open https://<host>:8443/setup
 # This publishes on 127.0.0.1 only: reach it through a VPN or tunnel (Tailscale, WireGuard,
-# ssh -L; see docs/server.md), or publish on the tunnel's address.
+# ssh -L; see README.md), or publish on the tunnel's address.
 # --host is the name or IP phones and MCP clients use (it goes into the TLS certificate).
 # There is no default password. For scripted installs, `init --admin-password-file F --host H`
 # still sets the password up front instead of the setup code.
 #
-# See docs/server.md for pairing, MCP clients, backups and security notes.
+# See README.md for pairing, MCP clients, backups and security notes.
 FROM eclipse-temurin:17-jre
 
 # Unprivileged user; the data directory is the only writable place it needs.

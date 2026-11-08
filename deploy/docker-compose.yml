@@ -9,12 +9,12 @@
 # Caddy terminates TLS with a Let's Encrypt certificate for ORBIT_DOMAIN and is the only
 # service with published ports. Orbit Server serves plain HTTP on the private Compose
 # network only (expose, never ports) and trusts X-Forwarded-* from Caddy's fixed address only.
-# See docs/server.md, "VPS with a domain (recommended)".
+# See README.md, "VPS with a domain (recommended)".
 name: orbit
 
 services:
   caddy:
-    image: caddy:2.11   # pinned minor; bump deliberately (see docs/server.md, Upgrades)
+    image: caddy:2.11   # pinned minor; bump deliberately (see README.md, Upgrades)
     restart: unless-stopped
     ports:
       - "80:80"        # ACME HTTP challenge and the redirect to https
