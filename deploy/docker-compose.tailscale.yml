@@ -1,0 +1,24 @@
+# Private server on Tailscale: an override for docker-compose.yml.
+# Needs Docker Compose 2.24.4 or newer (`ports: !override`).
+#
+#   In deploy/.env: COMPOSE_FILE=docker-compose.yml:docker-compose.tailscale.yml (so every plain
+#   `docker compose` command uses this override; without it, `up` publishes 80/443 on all
+#   addresses), ORBIT_DOMAIN=<machine>.<tailnet>.ts.net (MagicDNS name; turn on HTTPS certificates
+#   in the Tailscale admin console) and TAILSCALE_IP=<this machine's 100.x address>. Then:
+#   docker compose up -d --build && docker compose ps   # ports: 100.x.y.z:443 only
+#
+# The tailscaled socket gives Caddy (root in its container) control of the host's tailscaled,
+# whatever the :ro says. docs/server.md describes a certificate-file setup without the socket.
+#
+# Caddy asks the host's tailscaled for a real Let's Encrypt certificate for the *.ts.net name
+# through the mounted socket (Caddy does this by itself for *.ts.net hosts), so no ACME challenge
+# and no public port is needed. Caddy publishes 443 on the Tailscale address only, so the server
+# is reachable from your tailnet and nowhere else (Docker-published ports bypass ufw, which is why
+# the address is pinned instead of relying on the firewall).
+services:
+  caddy:
+    ports: !override
+      - "${TAILSCALE_IP:?set TAILSCALE_IP (tailscale ip -4) in deploy/.env}:443:443"
+      - "${TAILSCALE_IP:?set TAILSCALE_IP (tailscale ip -4) in deploy/.env}:443:443/udp"
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro

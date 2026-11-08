@@ -1,0 +1,15 @@
+# Caddy in front of Orbit Server. ORBIT_DOMAIN and ACME_EMAIL come from deploy/.env.
+{
+	email {$ACME_EMAIL}
+}
+
+{$ORBIT_DOMAIN} {
+	# Orbit Server sets CSP, X-Frame-Options, X-Content-Type-Options and Referrer-Policy itself;
+	# HSTS belongs at the TLS edge.
+	header Strict-Transport-Security "max-age=31536000"
+	header -Server
+
+	# Caddy sets X-Forwarded-For (the real client) and X-Forwarded-Proto: https. It drops any
+	# X-Forwarded-* a client sends, because no trusted_proxies are configured here.
+	reverse_proxy orbit:8080
+}

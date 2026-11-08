@@ -1,0 +1,3 @@
+# Only the server distribution goes into the build context (see Dockerfile).
+*
+!server/build/install/orbit-server/**

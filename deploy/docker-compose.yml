@@ -1,0 +1,68 @@
+# Orbit Server behind Caddy, for a VPS with a domain name.
+#
+#   cd deploy
+#   cp .env.example .env        # set ORBIT_DOMAIN and ACME_EMAIL
+#   (cd .. && ./gradlew :server:installDist)   # the image packages this build; no Gradle runs in Docker
+#   docker compose up -d --build
+#   docker compose logs orbit   # the one-time setup code
+#
+# Caddy terminates TLS with a Let's Encrypt certificate for ORBIT_DOMAIN and is the only
+# service with published ports. Orbit Server serves plain HTTP on the private Compose
+# network only (expose, never ports) and trusts X-Forwarded-* from Caddy's fixed address only.
+# See docs/server.md, "VPS with a domain (recommended)".
+name: orbit
+
+services:
+  caddy:
+    image: caddy:2.11   # pinned minor; bump deliberately (see docs/server.md, Upgrades)
+    restart: unless-stopped
+    ports:
+      - "80:80"        # ACME HTTP challenge and the redirect to https
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      ORBIT_DOMAIN: ${ORBIT_DOMAIN:?set ORBIT_DOMAIN in deploy/.env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data      # certificates and ACME account; keep it, or Caddy re-issues
+      - caddy-config:/config
+    networks:
+      orbit:
+        ipv4_address: 172.31.250.2   # orbit trusts forwarded headers from this address only
+    depends_on:
+      - orbit
+
+  orbit:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: orbit-server:local
+    restart: unless-stopped
+    command:
+      - run
+      - --behind-proxy
+      - --public-url
+      - https://${ORBIT_DOMAIN:?set ORBIT_DOMAIN in deploy/.env}
+      - --bind
+      - 0.0.0.0:8080
+      - --trusted-proxy
+      - 172.31.250.2/32
+    expose:
+      - "8080"        # reachable from Caddy on the Compose network only; never publish it
+    volumes:
+      - orbit-data:/data
+    networks:
+      orbit:
+        ipv4_address: 172.31.250.10
+
+networks:
+  orbit:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24   # pinned so the trusted-proxy address above is known in advance
+
+volumes:
+  orbit-data:
+  caddy-data:
+  caddy-config:

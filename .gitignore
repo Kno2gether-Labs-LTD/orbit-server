@@ -1,0 +1,14 @@
+.superpowers/
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+*.jks
+*.keystore
+captures/
+.cache_ggshield
+
+# Orbit Server deploy settings (domain, email)
+deploy/.env
