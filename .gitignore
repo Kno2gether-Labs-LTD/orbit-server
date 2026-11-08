@@ -17,3 +17,5 @@ deploy/.env
 .env
 .env.*
 !.env.example
+.code-review-graph/
+.kotlin/

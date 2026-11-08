@@ -1,0 +1,17 @@
+Orbit Server
+Copyright 2026 Kno2gether Labs LTD, Avijit Sarkar and Orbit Server contributors
+https://kno2gether.com · https://orbitapps.space
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product uses the following third-party components:
+
+- Kotlin, kotlinx.coroutines and kotlinx.serialization (https://kotlinlang.org) - Apache License 2.0.
+- Ktor (https://ktor.io) - Apache License 2.0.
+- Bouncy Castle (https://www.bouncycastle.org) - MIT-style Bouncy Castle Licence.
+- bcrypt (https://github.com/patrickfav/bcrypt) - Apache License 2.0.
+- SQLite JDBC (https://github.com/xerial/sqlite-jdbc) - Apache License 2.0.
+- SLF4J (https://www.slf4j.org) - MIT License.
+
+Orbit Server is an independent project, not affiliated with or endorsed by any ring maker,
+glasses maker, AI provider or voice provider. Product names are trademarks of their owners.
