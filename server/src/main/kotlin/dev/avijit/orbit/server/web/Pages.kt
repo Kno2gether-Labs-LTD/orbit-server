@@ -94,6 +94,9 @@ class PairVm(
     val fingerprint: String?, val refreshCount: Int,
     /** Behind a reverse proxy: the phone checks the public certificate against the host (trust mode `ca`). */
     val publicCa: Boolean = false,
+    /** The same one-time code as an `orbitwalker://pair` link for the OrbitWalker glasses app, with its QR. */
+    val walkerUri: String? = null,
+    val walkerQrSvg: String? = null,
 )
 
 data class AgentForm(val kind: String, val baseUrl: String, val model: String)
@@ -343,6 +346,20 @@ object Pages {
                         +"The phone must reach the server address above. If it can't, restart with "
                         code { +"orbit-server run --host <LAN name or IP>" }; +"."
                     }
+                }
+            }
+        }
+        if (vm.walkerUri != null && vm.walkerQrSvg != null) {
+            section(classes = "card walker-pair") {
+                div(classes = "walker-qr") { raw(vm.walkerQrSvg) }
+                div(classes = "walker-text") {
+                    h3 { +"Pairing OrbitWalker (AR glasses)?" }
+                    p(classes = "meta") {
+                        +"Scan this code in OrbitWalker instead. It is the same one-time code as above, so it pairs one device: "
+                        +"whichever app uses it first."
+                    }
+                    div(classes = "field-label") { +"OrbitWalker pairing link (one-time, do not share)" }
+                    copyBlock("pair-uri-walker", vm.walkerUri, "Copy link")
                 }
             }
         }

@@ -3,6 +3,7 @@ package dev.avijit.orbit.server.web
 import at.favre.lib.crypto.bcrypt.BCrypt
 import dev.avijit.orbit.server.Pairing
 import dev.avijit.orbit.server.Qr
+import dev.avijit.orbithealth.sync.PairingUri
 import dev.avijit.orbit.server.Secrets
 import dev.avijit.orbit.server.ServerDeps
 import dev.avijit.orbit.server.Settings
@@ -437,14 +438,24 @@ class Dashboard(private val deps: ServerDeps) {
         val now = deps.clock.millis()
         deps.proxy?.let { proxy ->
             // Behind a reverse proxy: the public certificate is checked against the exact host (trust mode `ca`).
-            val uri = deps.pairing.newPublicCaToken(proxy.publicUrl, serverName).toUri()
-            return PairVm(uri, Qr.svg(uri, label = "Pairing QR code"), now + Pairing.TOKEN_TTL_MS, now, proxy.publicUrl, null, refresh, publicCa = true)
+            val link = deps.pairing.newPublicCaToken(proxy.publicUrl, serverName)
+            val uri = link.toUri()
+            val walker = link.toUri(PairingUri.WALKER_PREFIX)
+            return PairVm(
+                uri, Qr.svg(uri, label = "Pairing QR code"), now + Pairing.TOKEN_TTL_MS, now, proxy.publicUrl, null, refresh, publicCa = true,
+                walkerUri = walker, walkerQrSvg = Qr.svg(walker, label = "OrbitWalker pairing QR code"),
+            )
         }
         val base = deps.publicUrl ?: "https://localhost:8443"
         val fp = deps.fingerprint
         if (fp == null || !base.startsWith("https://")) return PairVm(null, null, now, now, base, null, refresh)
-        val uri = deps.pairing.newToken(base, fp, serverName).toUri()
-        return PairVm(uri, Qr.svg(uri, label = "Pairing QR code"), now + Pairing.TOKEN_TTL_MS, now, base, fp, refresh)
+        val link = deps.pairing.newToken(base, fp, serverName)
+        val uri = link.toUri()
+        val walker = link.toUri(PairingUri.WALKER_PREFIX)
+        return PairVm(
+            uri, Qr.svg(uri, label = "Pairing QR code"), now + Pairing.TOKEN_TTL_MS, now, base, fp, refresh,
+            walkerUri = walker, walkerQrSvg = Qr.svg(walker, label = "OrbitWalker pairing QR code"),
+        )
     }
 
     private fun devices(): List<DeviceVm> = deps.store.listDevices().map { d ->

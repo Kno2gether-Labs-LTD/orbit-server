@@ -264,6 +264,25 @@ class DashboardTest {
         assertEquals(HttpStatusCode.OK, pair(token = u2.token).status)
     }
 
+    @Test fun pairPageAlsoOffersAnOrbitWalkerLinkForTheSameToken() = withDashboard {
+        val b = Browser(this)
+        b.login()
+        val html = b.get("/pair").bodyAsText()
+        val ring = pairingUriIn(html)
+        val raw = Regex("""orbitwalker://pair\?[^"<\s]+""").find(html)!!.value.replace("&amp;", "&")
+        assertTrue(raw.startsWith(PairingUri.WALKER_PREFIX + "?"))
+        assertEquals("same one-time token, same link otherwise", ring, PairingUri.parse(raw))
+        assertEquals(ring.toUri(PairingUri.WALKER_PREFIX), raw)
+        assertTrue(html.contains("Pairing OrbitWalker (AR glasses)?"))
+        val svgs = Regex("""<svg[^>]*class="qr"[\s\S]*?</svg>""").findAll(html).map { it.value }.toList()
+        assertEquals(2, svgs.size)
+        assertEquals(ring.toUri(), decodeQrMatrix(qrSvgModules(svgs[0])))
+        assertEquals(raw, decodeQrMatrix(qrSvgModules(svgs[1])))
+        // One token: whichever app redeems it first.
+        assertEquals(HttpStatusCode.OK, pair(token = PairingUri.parse(raw)!!.token).status)
+        assertEquals(HttpStatusCode.Unauthorized, pair(token = ring.token).status)
+    }
+
     @Test fun tokenCreateShowsTheTokenOnceWithSnippets() = withDashboard {
         val b = Browser(this)
         b.login()

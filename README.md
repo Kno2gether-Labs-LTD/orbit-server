@@ -1,20 +1,134 @@
 # Orbit Server
 
-Orbit Server is the self-hosted companion to the Orbit Health app. You run it on a machine you control: your Mac, a home server or a small VPS. Once you pair the phone, it pushes your ring data to the server over HTTPS. The phone pins the server's certificate, and it keeps its own copy of everything. The server then gives you:
+Orbit Server is a small self-hosted server that holds an agent and its tools for the Orbit family of apps. You run it on a machine you control (a Mac, a home server, a small VPS), pair your devices with it, and choose the model it uses: the Claude API, or a local model through Ollama or LM Studio.
 
-- **A dashboard** at `https://<host>:8443/`. It shows your latest readings, devices, agent settings, agent tokens, the access log and a JSON export.
-- **An agent** that answers questions you ask in the app's Ask tab, using your data. It calls read-only tools such as `get_metric`, `get_sleep`, `daily_summary` and `compare_to_baseline`, and every answer says what it was based on. You choose the model: the Claude API, or a local model through Ollama or LM Studio.
-- **An MCP endpoint** at `https://<host>:8443/mcp` and a small REST data API at `/v1/data/*`. With these, your own agents can read your data: Claude Code, Claude Desktop, Cursor, scripts. Each one gets its own scoped token, which you can revoke.
-- **An access log** of every read of your data by the agent, an MCP client, the data API or the dashboard. The phone shows it too, under Me → Agent & sync.
+- **Orbit Health** (smart-ring app) pushes ring data here over HTTPS and asks the health agent questions about it. The agent answers only from read-only tools (`get_metric`, `get_sleep`, `daily_summary`, `compare_to_baseline`, `list_metrics`), and every answer says what it was based on.
+- **OrbitWalker** (AR-glasses app) uses a voice agent here. The glasses declare their own *client tools* (open an app, close a screen, start recording, ...) that run on the phone, and the server mixes them with the health tools in one tool loop.
+- **Your own agents** (Claude Code, Claude Desktop, Cursor, scripts) read your data through an MCP endpoint (`/mcp`) and a REST data API (`/v1/data/*`), each with its own scoped, revocable token.
+- **A dashboard** at `https://<host>/` shows the latest readings, devices, agent settings, agent tokens, the access log and a JSON export, and shows pairing codes.
+- **An access log** records every read of your data by the agent, an MCP client, the data API or the dashboard. It names the tool and range, never the values.
 
-Nothing leaves the server unless you set it up that way. If you choose the Claude API, the agent sends the tool results it needs for that one question to Anthropic. A local model keeps everything on your network.
+Nothing leaves the server unless you set it up that way. With the Claude API, the agent sends Anthropic the tool results (and, for OrbitWalker, the glasses context) it needs for that one request; a local model keeps everything on your network.
 
-Everything lives in one folder: `~/.orbit-server/`, or `$ORBIT_SERVER_HOME` if you set it. The folder is mode 0700 and each file in it is 0600.
+The repository has three Gradle modules: `:server` (the Ktor server, JVM 17), `:sync-protocol` (the wire DTOs and pairing-link format the apps share) and `:ring-core` (ring metric definitions).
+
+## Quick start
+
+You need Java 17+ to build, and Docker to run the recommended setup.
+
+```sh
+./gradlew :server:test                 # optional: run the tests
+./gradlew :server:installDist          # build the distribution the Docker image packages
+```
+
+Then pick one:
+
+- **VPS with a domain (Docker + Caddy).** Caddy gets a Let's Encrypt certificate for `orbit.example.com` and forwards to Orbit Server on a private Compose network.
+
+  ```sh
+  cd deploy
+  cp .env.example .env && chmod 600 .env   # set ORBIT_DOMAIN=orbit.example.com and ACME_EMAIL
+  docker compose up -d --build
+  docker compose logs --tail 30 orbit      # the one-time setup code
+  ```
+
+  Open `https://orbit.example.com/`, enter the setup code and choose the admin password. Full guide: [VPS with a domain](#vps-with-a-domain-recommended).
+- **Private server on Tailscale.** The same bundle with `docker-compose.tailscale.yml`: port 443 only on the machine's Tailscale address, with a `*.ts.net` certificate. See [Private server on Tailscale](#private-server-on-tailscale).
+- **A Mac or LAN machine (self-signed).** `orbit-server run --host mymac.local` serves HTTPS on port 8443 with a self-signed certificate that the apps pin. See [Initialise](#initialise-init---host) and [Run](#run).
+
+Then set the model under **Agent** in the dashboard ([Choose a model](#choose-a-model)) and pair your devices:
+
+- **Orbit Health:** dashboard → **Pair a phone**, scan the QR code in the app (Me → Agent & sync → Scan pairing code). From a shell: `orbit-server pair`.
+- **OrbitWalker:** the same page has a second, smaller QR under "Pairing OrbitWalker (AR glasses)?". It is the same one-time code as an `orbitwalker://pair?...` link, so the ring app never opens it. From a shell: `orbit-server pair --walker`. A code pairs one device, whichever app uses it first.
+
+## API
+
+All routes are HTTPS (or plain HTTP to a trusted reverse proxy only). Errors are `{"error": "<code>"}`.
+
+| Route | Auth | What it does |
+|---|---|---|
+| `GET /health` | none | `{ok, fingerprint}` |
+| `POST /v1/pair` | one-time pairing token | Redeem a pairing code: `{token, deviceName}` → `{deviceToken, deviceId, serverName, scopes}` |
+| `POST /v1/ingest` | device token | Push samples and sleep (Orbit Health) |
+| `GET /v1/state` | device token | Newest stored time per metric, so the phone sends only newer data |
+| `PATCH /v1/devices/me/scopes`, `DELETE /v1/devices/me` | device token | Change what this device shares; unpair |
+| `GET /v1/access-log` | device token | Recent access-log rows |
+| `POST /v1/agent/ask` | device token | Health agent: `{question, history?, zone?}` → `{answer, provenance, model}` |
+| `POST /v1/walker/ask` | device token | OrbitWalker voice agent: start a turn (below) |
+| `POST /v1/walker/continue` | device token | OrbitWalker: send client-tool results for a paused turn |
+| `POST /mcp` | agent token | MCP (Streamable HTTP, JSON responses, stateless): the five read-only health tools |
+| `GET /v1/data/samples`, `GET /v1/data/sleep` | agent token | REST reads with server-side aggregation |
+| `/`, `/pair`, `/devices`, `/agent`, `/tokens`, `/access`, `/export`, `/cert.pem` | admin session | Dashboard |
+
+Device tokens come from pairing and carry the scopes chosen on the device (heart, sleep, activity, stress, SpO₂, ring & profile). Agent tokens are created on the dashboard or with `orbit-server token create`.
+
+### OrbitWalker: the client-tool flow
+
+A walker turn is a tool loop in which some tools run on the server (the health tools, with the device's own scopes) and others are **client tools** that the glasses app declares and runs itself. When the model calls a client tool, the server pauses the turn and hands the calls to the phone; the phone runs them and posts the results back; the loop continues until the model answers.
+
+1. The phone starts a turn:
+
+   ```json
+   POST /v1/walker/ask
+   {
+     "text": "open maps and tell me my heart rate",
+     "history": [{"role": "user", "text": "..."}, {"role": "assistant", "text": "..."}],
+     "context": {"screens": [{"id": "s1", "app": "Home", "focused": true}], "apps": ["Maps", "Camera"], "recording": false},
+     "tools": [
+       {"name": "open_app", "description": "Open an app on the glasses by name.",
+        "parameters": {"type": "object", "properties": {"app": {"type": "string"}}, "required": ["app"]}}
+     ],
+     "zone": "Europe/London"
+   }
+   ```
+
+   `context` (what is on the glasses right now) goes into the system prompt, pretty-printed and cut at 12 KB. `history`, `context`, `tools` and `zone` are optional.
+2. If the model needs the glasses, the reply is `status: "tools"`:
+
+   ```json
+   {
+     "status": "tools", "answer": null, "turn": "Q2xpZW50VHVybklkMTIzNA",
+     "calls": [{"id": "toolu_01", "name": "open_app", "args": {"app": "Maps"}}],
+     "say": "Opening Maps.",
+     "provenance": [{"tool": "get_metric", "args": {"metric": "HEART_RATE", "agg": "avg"}}],
+     "model": "claude-sonnet-5-5"
+   }
+   ```
+
+   `say` is any text the model sent with the calls (the phone may speak it while it works). `provenance` lists the health tools run on the server so far in this turn.
+3. The phone runs the calls and continues within 120 s, with exactly one result per call id (any order):
+
+   ```json
+   POST /v1/walker/continue
+   {"turn": "Q2xpZW50VHVybklkMTIzNA", "results": [{"id": "toolu_01", "content": "{\"opened\":\"Maps\"}", "isError": false}]}
+   ```
+
+   The reply is another `status: "tools"` (repeat step 3) or the end of the turn:
+
+   ```json
+   {"status": "done", "answer": "Maps is open. Your heart rate averaged 64 bpm over the last day.", "turn": null,
+    "calls": [], "say": null, "provenance": [{"tool": "get_metric", "args": {"metric": "HEART_RATE", "agg": "avg"}}],
+    "model": "claude-sonnet-5-5"}
+   ```
+
+Rules and limits:
+
+- Client tools: at most 40; names match `^[a-z][a-z0-9_]{0,47}$`, are unique and must not reuse a health tool name; descriptions up to 1000 characters; at most 32 KB of tool JSON in all. Otherwise 400 `bad_tools`.
+- At most 8 model calls per whole turn and 8 tool calls per step (extra calls get an error result). Each step's results, server and client, reach the model in the model's call order.
+- A paused turn is single use, belongs to the device that started it (any other device gets 404 `unknown_turn`), and expires 120 s after the pause (410 `turn_expired`). Results whose ids do not match the pending calls are 400 `bad_results` and the turn stays pending. Each result is cut at 16 KB. At most 64 turns can be paused at once (503 `busy`). Paused turns live in memory only; after a restart the phone starts again.
+- Other errors match `/v1/agent/ask`: 400 `bad_question` (empty or over 2000 characters), 409 `no_model`, 502 `model_error` (provider failure, or one HTTP call taking over 150 s), 413 for bodies over 128 KB, 429 `rate_limited`. Walker calls (ask and continue together) have their own budget of 60 per device per minute, separate from the 20 asks of `/v1/agent/ask`.
+- Each finished or failed turn writes one `walker_ask` access-log row, e.g. `outcome=ok model=... tool_calls=1 client_calls=2`. It never contains the user's words or tool arguments. Health reads during the turn are logged per call, as for the health agent.
+
+The request and reply shapes are `WalkerAskRequest`, `WalkerContinueRequest`, `WalkerReply` and friends in `sync-protocol` (`WalkerDtos.kt`), so the app can share them.
+
+## Data folder
+
+Everything lives in one folder: `~/.orbit-server/`, or `$ORBIT_SERVER_HOME` if you set it (the `/data` volume in Docker). The folder is mode 0700 and each file in it is 0600.
 
 | File | What it is |
 |---|---|
 | `orbit.db` (+ `-wal`, `-shm`) | SQLite database: samples, sleep, devices, token hashes, settings, access log |
-| `tls.p12`, `tls.pass` | The self-signed TLS certificate and key. Phones pin its SHA-256 fingerprint. |
+| `tls.p12`, `tls.pass` | The self-signed TLS certificate and key. Devices pin its SHA-256 fingerprint. |
 | `master.key` | 32-byte key that encrypts saved model API keys (AES-256-GCM) |
 
 ## Install
@@ -243,7 +357,7 @@ orbit-server init --host <your Mac's .local name or LAN IP> --name "Home Mac"
 
 The certificate always covers `localhost`, `127.0.0.1`, `10.0.2.2` (the Android emulator's address for the host) and the machine's own host name. Add every name or IP that other devices will use to reach the server:
 
-- **On a Mac:** the Bonjour name, which works on any LAN and survives DHCP changes. Find it with `scutil --get LocalHostName`, then add `.local`, for example `--host studio.local`. A fixed LAN IP works too.
+- **On a Mac:** the Bonjour name, which works on any LAN and survives DHCP changes. Find it with `scutil --get LocalHostName`, then add `.local`, for example `--host mymac.local`. A fixed LAN IP works too.
 - **On a VPS:** its DNS name, for example `--host orbit.example.com`.
 - **Over Tailscale:** the tailnet name or the 100.x address.
 
@@ -274,7 +388,7 @@ On a Mac, the first `run` may trigger the firewall prompt "Do you want the appli
 
 ### Keep it running on a Mac (launchd)
 
-Save this as `~/Library/LaunchAgents/dev.avijit.orbit-server.plist`. Replace `YOU` with your user name. Replace `PATH-FROM-java_home` with the path `/usr/libexec/java_home -v 17` (or your installed version) prints, because launchd doesn't load your shell's `PATH` or `JAVA_HOME`.
+Save this as `~/Library/LaunchAgents/local.orbit-server.plist`. Replace `YOU` with your user name. Replace `PATH-FROM-java_home` with the path `/usr/libexec/java_home -v 17` (or your installed version) prints, because launchd doesn't load your shell's `PATH` or `JAVA_HOME`.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -282,7 +396,7 @@ Save this as `~/Library/LaunchAgents/dev.avijit.orbit-server.plist`. Replace `YO
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>dev.avijit.orbit-server</string>
+  <string>local.orbit-server</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOU/orbit-server/bin/orbit-server</string>
@@ -306,9 +420,9 @@ Save this as `~/Library/LaunchAgents/dev.avijit.orbit-server.plist`. Replace `YO
 ```
 
 ```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.avijit.orbit-server.plist
-launchctl kickstart -k gui/$(id -u)/dev.avijit.orbit-server   # restart after an upgrade
-launchctl bootout gui/$(id -u)/dev.avijit.orbit-server        # stop and unload
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.orbit-server.plist
+launchctl kickstart -k gui/$(id -u)/local.orbit-server   # restart after an upgrade
+launchctl bootout gui/$(id -u)/local.orbit-server        # stop and unload
 ```
 
 A LaunchAgent runs while you are logged in. The phone syncs whenever it can reach the server and catches up after gaps. To have the Mac answer at night, turn on System Settings → Displays → Advanced → "Prevent automatic sleeping on power adapter when the display is off" (on a laptop, under Battery → Options).
@@ -372,6 +486,8 @@ The app pins the certificate fingerprint from the code, so it talks only to *thi
 
 The terminal's QR code says the same: "Me → Agent & sync → Scan pairing code".
 
+**OrbitWalker (AR glasses).** Under the main QR code, the pairing page has a smaller one under "Pairing OrbitWalker (AR glasses)?", with an `orbitwalker://pair?...` link. From a shell, `orbit-server pair --walker` prints the same. It is the same one-time code (same query, different scheme, so Orbit Health never opens it), and it pairs whichever app uses it first: open a fresh page for each device. The glasses get their own device token and scopes. They use `/v1/walker/*` and do not push ring data, so they don't affect the "one phone" rule below.
+
 **One person, one phone.** The server keeps a single "newest stored time" per metric, shared by everything that pushes to it, and each phone sends only data newer than that. It is built for one person syncing from one phone. If a second phone pushes to the same server, or the ring's clock ran ahead (the server accepts timestamps up to a day in the future), the mark moves past readings this phone has not sent yet, and those readings are not pushed (only activity totals from the last 24 hours are re-sent). The phone keeps its own copy either way. Use one server per person and one phone per server.
 
 If the server's certificate changes, for example after `--regenerate-cert`, a restore onto a new machine without `tls.p12`, or someone in the middle, the app stops and shows **"Server identity changed — re-pair"**. It sends nothing until you scan a new code. After re-pairing, remove the old entry under **Devices** in the dashboard, because the app can't revoke it through the changed identity.
@@ -395,7 +511,7 @@ Open **Agent** in the dashboard:
 Create a token in the dashboard (**Agent tokens**) or on the command line. Give it only the scopes it needs:
 
 ```sh
-orbit-server token create --name claude-code --scopes heart,sleep,activity --host studio.local
+orbit-server token create --name claude-code --scopes heart,sleep,activity --host mymac.local
 orbit-server cert export ~/orbit-server.pem
 ```
 
@@ -404,7 +520,7 @@ The token is shown once. Only its SHA-256 hash is stored.
 Claude Code is a Node program. It must trust the self-signed certificate through `NODE_EXTRA_CA_CERTS`, and the URL must use a name the certificate covers (see `init --host`):
 
 ```sh
-claude mcp add --transport http orbit https://studio.local:8443/mcp \
+claude mcp add --transport http orbit https://mymac.local:8443/mcp \
   --header "Authorization: Bearer <token>"
 NODE_EXTRA_CA_CERTS=~/orbit-server.pem claude
 ```
@@ -420,7 +536,7 @@ Other clients use the same URL and header:
   "mcpServers": {
     "orbit": {
       "type": "http",
-      "url": "https://studio.local:8443/mcp",
+      "url": "https://mymac.local:8443/mcp",
       "headers": { "Authorization": "Bearer <token>" }
     }
   }
@@ -438,7 +554,7 @@ For scripts, the REST data API takes the same tokens:
 
 ```sh
 curl --cacert ~/orbit-server.pem -H "Authorization: Bearer <token>" \
-  "https://studio.local:8443/v1/data/samples?metric=HEART_RATE&from=today&agg=hourly"
+  "https://mymac.local:8443/v1/data/samples?metric=HEART_RATE&from=today&agg=hourly"
 ```
 
 Revoke a token with `orbit-server token revoke <id>`, or in the dashboard. Revocation takes effect on the next request.
@@ -473,17 +589,15 @@ docker run --rm -i -v orbit-data:/data eclipse-temurin:17-jre tar -xzf - -C /dat
 - **The server is a trusted endpoint.** Anyone with shell access to the machine, or with the admin password, can read your data. Use a machine you control, a strong admin password, and an OS account only you use.
 - **Encrypt the disk.** Turn on FileVault on a Mac, LUKS or the provider's disk encryption on a VPS. The database itself is not encrypted at rest; it relies on the 0700/0600 permissions and the disk.
 - **Network:**
-  - The phone pins the certificate.
-  - MCP clients and browsers trust it explicitly.
-  - Plain HTTP is never served.
-  - Each phone may push 60 times and ask 20 questions a minute (then 429). A question gets at most 150 s for all its model calls; past that the phone shows the model error and the access log records `outcome=timeout`.
+  - Devices pin the self-signed certificate, or check the public certificate for your exact host name behind Caddy. Plain HTTP is never served except to a trusted reverse proxy.
   - Keep the port off the open internet when you can, and use the LAN or a VPN such as Tailscale.
-  - Behind Caddy (`--behind-proxy`), the server speaks plain HTTP only to the proxy. Keep its port unpublished, and name only the proxy in `--trusted-proxy`: forwarded headers from any other address are ignored, and dashboard forms are refused unless the trusted proxy reports https.
+  - Behind Caddy (`--behind-proxy`), keep Orbit Server's port unpublished and name only the proxy in `--trusted-proxy`: forwarded headers from any other address are ignored, and dashboard forms are refused unless the trusted proxy reports https.
+- **Rate limits per device:** 60 ingests, 20 health-agent asks and 60 walker calls a minute (then 429). Agent tokens: 120 requests a minute. A health-agent ask gets at most 150 s for all its model calls; for OrbitWalker the 150 s applies to each HTTP call of a turn.
 - **Tokens:**
-  - Device and agent tokens are 256-bit random values, and only their SHA-256 hashes are stored.
-  - Pairing codes are single use and expire after 10 minutes.
-  - Give each agent its own token with the smallest set of scopes, and revoke tokens you no longer use (`orbit-server token revoke`, or the dashboard).
-  - Remove a lost phone under **Devices**.
-- **Model choice is a privacy choice.** With the Claude API, the tool results for each question go to Anthropic. With Ollama or LM Studio they stay on your machine.
-- **Check the access log.** It lists who read what and how many rows, but never the values. Revoked or out-of-scope attempts are logged as `DENIED`.
-- **Logs** contain no health values and no tokens.
+  - Device and agent tokens are 256-bit random values; only their SHA-256 hashes are stored.
+  - Pairing codes are single use and expire after 10 minutes. The `orbit://` and `orbitwalker://` links on the pairing page are the same code.
+  - Give each agent its own token with the smallest set of scopes, and revoke tokens you no longer use (`orbit-server token revoke`, or the dashboard). Remove a lost phone or glasses under **Devices**.
+- **OrbitWalker client tools run on the phone, not here.** The server only relays the model's calls and the phone's results; the glasses app decides what each tool may do. Health tools in a walker turn use the scopes of the device that asked. A paused turn (conversation, health results, glasses context) is held in memory for at most 120 s and is never written to disk or logs.
+- **Model choice is a privacy choice.** With the Claude API, the tool results for each request, and the glasses context for OrbitWalker, go to Anthropic. With Ollama or LM Studio they stay on your machine.
+- **Check the access log.** It lists who read what and how many rows, never the values. Revoked or out-of-scope attempts are logged as `DENIED`.
+- **Logs** contain no health values, no tokens and no user words.

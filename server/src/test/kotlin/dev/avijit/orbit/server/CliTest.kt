@@ -205,6 +205,25 @@ class CliTest {
         }
     }
 
+    @Test fun pairWalkerPrintsAnOrbitWalkerLinkAndTheDefaultIsUnchanged() = withTempDir { dir ->
+        val home = initHome(dir)
+        val (code, out) = cli(home, "pair", "--host", "192.168.1.50", "--port", "18443", "--walker")
+        assertEquals(out, 0, code)
+        assertTrue(out, out.contains("Scan with OrbitWalker"))
+        assertFalse(out, out.lines().any { it.trim().startsWith("orbit://pair?") })
+        val line = out.lines().single { it.trim().startsWith("orbitwalker://pair?") }.trim()
+        val uri = PairingUri.parse(line)!!
+        assertEquals("https://192.168.1.50:18443", uri.url)
+        assertEquals(line, uri.toUri(PairingUri.WALKER_PREFIX))
+        assertEquals(line, decodeTerminalQr(out))
+        Store(ServerHome(home).dbFile).use { assertNotNull(Pairing(it, java.time.Clock.systemUTC()).redeem(uri.token, "Glasses")) }
+
+        val (c2, plain) = cli(home, "pair", "--host", "192.168.1.50", "--port", "18443")
+        assertEquals(plain, 0, c2)
+        assertFalse(plain, plain.contains("orbitwalker"))
+        assertTrue(plain, plain.contains("Scan with Orbit Health (Me → Agent & sync → Scan pairing code):"))
+    }
+
     @Test fun pairUrlOverrideAndDefaults() = withTempDir { dir ->
         val home = initHome(dir)
         val (code, out) = cli(home, "pair", "--url", "https://orbit.example.net:9443/")

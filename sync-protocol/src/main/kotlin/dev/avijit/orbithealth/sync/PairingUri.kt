@@ -26,6 +26,9 @@ enum class TrustMode(val wire: String) {
  *
  * Pin-mode links are written exactly as before (no `m`), so older apps keep reading them. Ca-mode links carry
  * `m=ca` and usually no `fp`.
+ *
+ * The OrbitWalker glasses app registers [WALKER_PREFIX] (`orbitwalker://pair`, same query) so the Orbit Health app
+ * never intercepts its links; [toUri] with that prefix writes one and [parse] accepts both prefixes.
  */
 data class PairingUri(
     val url: String,
@@ -39,22 +42,33 @@ data class PairingUri(
         require(mode != TrustMode.CA || url.startsWith("https://")) { "ca mode needs an https url" }
     }
 
-    fun toUri(): String = buildString {
-        append("$PREFIX?u=${enc(url)}")
+    fun toUri(): String = toUri(PREFIX)
+
+    /** This link under [prefix]: [ORBIT_PREFIX] (what [toUri] writes) or [WALKER_PREFIX]. */
+    fun toUri(prefix: String): String = buildString {
+        require(prefix in PREFIXES) { "unknown pairing prefix" }
+        append("$prefix?u=${enc(url)}")
         fingerprint?.let { append("&fp=$it") }
         append("&t=${enc(token)}&n=${enc(name)}")
         if (mode != TrustMode.PIN) append("&m=${mode.wire}")
     }
 
     companion object {
-        private const val PREFIX = "orbit://pair"
+        /** The Orbit Health app's scheme. */
+        const val ORBIT_PREFIX = "orbit://pair"
+
+        /** The OrbitWalker (AR glasses) app's scheme. */
+        const val WALKER_PREFIX = "orbitwalker://pair"
+        private const val PREFIX = ORBIT_PREFIX
+        private val PREFIXES = listOf(ORBIT_PREFIX, WALKER_PREFIX)
         private val FP = Regex("[0-9a-f]{64}")
         private val KEYS = setOf("u", "fp", "t", "n", "m")
 
         private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
         /**
-         * Null for anything that is not exactly a pairing link; never throws. Rejected: other prefixes, a missing,
+         * Null for anything that is not exactly a pairing link; never throws. Accepts [ORBIT_PREFIX] and
+         * [WALKER_PREFIX] (the result does not say which). Rejected: other prefixes, a missing,
          * empty or repeated key, malformed percent-encoding or UTF-8, a [url] that is not `https://host[:port][/path]`
          * (non-empty host, port 1–65535, no user info), a fingerprint that is not 64 lowercase hex digits, a trust
          * mode other than `pin` or `ca`, and a pin-mode link (the default) without a fingerprint.
@@ -66,9 +80,9 @@ data class PairingUri(
         }
 
         private fun parseOrNull(s: String): PairingUri? {
-            if (!s.startsWith("$PREFIX?")) return null
+            val prefix = PREFIXES.firstOrNull { s.startsWith("$it?") } ?: return null
             val params = HashMap<String, String>()
-            for (part in s.substring(PREFIX.length + 1).split('&')) {
+            for (part in s.substring(prefix.length + 1).split('&')) {
                 val i = part.indexOf('=')
                 if (i < 0) return null
                 val key = decode(part.substring(0, i)) ?: return null

@@ -1,6 +1,7 @@
 package dev.avijit.orbit.server
 
 import at.favre.lib.crypto.bcrypt.BCrypt
+import dev.avijit.orbithealth.sync.PairingUri
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -156,9 +157,13 @@ class Cli(
         return 0
     }
 
-    /** `pair [--host H | --url U] [--port P]`: a one-time pairing URI and QR, valid for 10 minutes. */
+    /**
+     * `pair [--host H | --url U] [--port P] [--walker]`: a one-time pairing URI and QR, valid for 10 minutes.
+     * `--walker` prints the same kind of link for the OrbitWalker glasses app (`orbitwalker://pair`).
+     */
     private fun pair(a: Args): Int {
-        a.allowOnly("host", "port", "url")
+        a.allowOnly("host", "port", "url", "walker")
+        val prefix = if (a.flag("walker")) PairingUri.WALKER_PREFIX else PairingUri.ORBIT_PREFIX
         val hosts = validHosts(a)
         if (hosts.size > 1) throw UsageException("give --host once")
         val port = a.value("port")?.let(::parsePort)
@@ -168,7 +173,7 @@ class Cli(
         val proxyUrl = Store(home.dbFile).use { it.getSetting(Settings.PUBLIC_URL) }
         if (proxyUrl != null) {
             if (hosts.isNotEmpty() || port != null) throw UsageException("this server runs behind a reverse proxy; use --url (default $proxyUrl)")
-            return pairPublicCa(home, explicitUrl ?: proxyUrl)
+            return pairPublicCa(home, explicitUrl ?: proxyUrl, prefix)
         }
         val tls = Tls.loadOrCreate(home, hosts)
         Store(home.dbFile).use { store ->
@@ -177,25 +182,26 @@ class Cli(
                 "https://${HostNames.forUrl(host)}:${port ?: lastPort(store)}"
             }
             val name = store.getSetting(Settings.SERVER_NAME) ?: Pairing.DEFAULT_SERVER_NAME
-            val uri = Pairing(store, java.time.Clock.systemUTC()).newToken(url, tls.fingerprintSha256, name).toUri()
-            printPairing(uri, url, "Fingerprint: ${tls.fingerprintSha256}")
+            val uri = Pairing(store, java.time.Clock.systemUTC()).newToken(url, tls.fingerprintSha256, name).toUri(prefix)
+            printPairing(uri, url, "Fingerprint: ${tls.fingerprintSha256}", prefix)
         }
         return 0
     }
 
     /** `pair` after `run --behind-proxy`: a trust-mode `ca` link (public certificate, exact host, no fingerprint). */
-    private fun pairPublicCa(home: ServerHome, url: String): Int {
+    private fun pairPublicCa(home: ServerHome, url: String, prefix: String): Int {
         Store(home.dbFile).use { store ->
             val name = store.getSetting(Settings.SERVER_NAME) ?: Pairing.DEFAULT_SERVER_NAME
-            val uri = Pairing(store, java.time.Clock.systemUTC()).newPublicCaToken(url, name).toUri()
-            printPairing(uri, url, "Certificate: public (the app checks it for this host name)")
+            val uri = Pairing(store, java.time.Clock.systemUTC()).newPublicCaToken(url, name).toUri(prefix)
+            printPairing(uri, url, "Certificate: public (the app checks it for this host name)", prefix)
         }
         return 0
     }
 
-    private fun printPairing(uri: String, url: String, trustLine: String) {
+    private fun printPairing(uri: String, url: String, trustLine: String, prefix: String) {
         val expires = java.time.LocalTime.now().plusSeconds(Pairing.TOKEN_TTL_MS / 1000).withNano(0)
-        out.println("Scan with Orbit Health (Me → Agent & sync → Scan pairing code):")
+        if (prefix == PairingUri.WALKER_PREFIX) out.println("Scan with OrbitWalker (AR glasses):")
+        else out.println("Scan with Orbit Health (Me → Agent & sync → Scan pairing code):")
         out.println()
         out.print(TerminalQr.render(uri))
         out.println()
@@ -565,9 +571,10 @@ class Cli(
             |         Phones pair against the public URL and check its public certificate.
             |  setup-code
             |         Print a new one-time setup code (the old one stops working). Only before setup.
-            |  pair   [--host H] [--port P] | [--url https://host:port]
+            |  pair   [--host H] [--port P] | [--url https://host:port]  [--walker]
             |         Print a one-time pairing QR code and link (valid 10 minutes). The URL defaults to
             |         https://<first LAN IPv4 address>:<last run port, else 8443>.
+            |         --walker prints an orbitwalker://pair link for the OrbitWalker glasses app instead.
             |  token create --name N --scopes heart,sleep,...|all [--host H] [--port P] | [--url U]
             |         Create an agent token for MCP / the data API. Prints the token once, with MCP client config.
             |  token list                 List agent tokens (never the secrets).
@@ -595,7 +602,7 @@ private class Args(private val map: Map<String, List<String>>) {
 
     companion object {
         private const val FLAG = "\u0000flag"
-        private val FLAGS = setOf("force", "regenerate-cert", "insecure-dev", "behind-proxy", "i-understand-this-is-demo-data")
+        private val FLAGS = setOf("force", "regenerate-cert", "insecure-dev", "behind-proxy", "i-understand-this-is-demo-data", "walker")
 
         fun parse(args: List<String>): Args {
             val m = LinkedHashMap<String, MutableList<String>>()

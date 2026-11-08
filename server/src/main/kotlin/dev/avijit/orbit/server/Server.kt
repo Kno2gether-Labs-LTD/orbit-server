@@ -18,6 +18,7 @@ import dev.avijit.orbit.server.api.deviceBearer
 import dev.avijit.orbit.server.api.deviceRoutes
 import dev.avijit.orbit.server.api.ingestRoutes
 import dev.avijit.orbit.server.api.pairingRoutes
+import dev.avijit.orbit.server.api.walkerRoutes
 import dev.avijit.orbit.server.web.Dashboard
 import dev.avijit.orbit.server.web.SecurityHeaders
 import io.ktor.http.HttpStatusCode
@@ -74,6 +75,9 @@ data class Limits(
     val maxMcpBatch: Int = 10,
     /** Failed dashboard logins per client address (IPv6 by /64) in 15 minutes; successful logins are not counted. */
     val loginFailuresPer15Min: Int = 5,
+    /** `/v1/walker/ask` + `/v1/walker/continue` per device; its own budget, so glasses never use up the ring app's asks. */
+    val walkerCallsPerMinute: Int = 60,
+    val maxWalkerBytes: Int = 128 * 1024,
 )
 
 /**
@@ -165,6 +169,7 @@ fun Application.orbitModule(deps: ServerDeps) {
             ingestRoutes(ingest, deps.limits, ingestLimiter)
             deviceRoutes(deps.store, deps.accessLog)
             agentRoutes(deps, askLimiter)
+            walkerRoutes(deps)
         }
     }
 }
